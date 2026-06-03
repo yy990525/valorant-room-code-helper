@@ -1,0 +1,5 @@
+node_modules/
+.tesseract-cache/
+debug/
+config.json
+npm-debug.log*

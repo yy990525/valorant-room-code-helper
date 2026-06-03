@@ -1,0 +1,19 @@
+{
+  "name": "valorant-room-code-helper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Screen OCR helper for copying live-stream room codes into VALORANT custom room input.",
+  "type": "module",
+  "scripts": {
+    "setup": "node src/index.js setup",
+    "start": "node src/index.js start",
+    "test-ocr": "node src/index.js test-ocr",
+    "test:ocr": "node src/index.js test-ocr"
+  },
+  "dependencies": {
+    "@tesseract.js-data/eng": "^1.0.0",
+    "jimp": "^1.6.0",
+    "screenshot-desktop": "^1.15.1",
+    "tesseract.js": "^6.0.1"
+  }
+}
