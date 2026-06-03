@@ -142,6 +142,12 @@ async function setup() {
   try {
     const result = await recognizeOnce(worker, config);
     printOcrResult(result, 'Room code after Step 1');
+    if (result.code) {
+      await copyToClipboard(result.code);
+      console.log(`Copied to clipboard: ${result.code}`);
+    } else {
+      console.log('No code recognized. Clipboard was not changed.');
+    }
   } finally {
     await worker.terminate();
   }
@@ -400,13 +406,35 @@ function psString(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
+async function copyToClipboard(value) {
+  if (!value) {
+    throw new Error('Cannot copy an empty value to clipboard.');
+  }
+
+  const script = [
+    'Add-Type -AssemblyName System.Windows.Forms',
+    `[System.Windows.Forms.Clipboard]::SetText(${psString(value)})`,
+    `$actual = [System.Windows.Forms.Clipboard]::GetText()`,
+    `if ($actual -ne ${psString(value)}) { throw "Clipboard verification failed. Expected ${value}, got $actual" }`
+  ].join('; ');
+
+  await runPowerShell(['-Command', script], { windowsHide: true });
+}
+
 async function fillCode(code, config) {
+  if (!code) {
+    console.log('\nNo code recognized. Skipping paste/join.');
+    return false;
+  }
+
   const mouseInputType = 'using System; using System.Runtime.InteropServices; public static class MouseInput { [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y); [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo); public const uint LEFTDOWN = 0x0002; public const uint LEFTUP = 0x0004; public static void Click(int x, int y) { SetCursorPos(x, y); mouse_event(LEFTDOWN, 0, 0, 0, UIntPtr.Zero); mouse_event(LEFTUP, 0, 0, 0, UIntPtr.Zero); } }';
   const script = [
     'Add-Type -AssemblyName System.Windows.Forms',
     'Add-Type -AssemblyName System.Drawing',
     `Add-Type -TypeDefinition ${psString(mouseInputType)}`,
     `[System.Windows.Forms.Clipboard]::SetText(${psString(code)})`,
+    `$actual = [System.Windows.Forms.Clipboard]::GetText()`,
+    `if ($actual -ne ${psString(code)}) { throw "Clipboard verification failed. Expected ${code}, got $actual" }`,
     `[MouseInput]::Click(${Math.round(config.inputPoint.x)}, ${Math.round(config.inputPoint.y)})`,
     'Start-Sleep -Milliseconds 70',
     config.clearBeforePaste ? '[System.Windows.Forms.SendKeys]::SendWait("^a")' : '',
@@ -419,6 +447,7 @@ async function fillCode(code, config) {
   ].filter(Boolean).join('; ');
 
   await runPowerShell(['-Command', script], { windowsHide: true });
+  return true;
 }
 
 function assertConfigured(config) {
@@ -555,7 +584,10 @@ async function start() {
           process.stdout.write('\x07');
         }
         console.log(`\n>>> DETECTED ${result.code} confidence=${conf.toFixed(1)}. Filling VALORANT input...`);
-        await fillCode(result.code, config);
+        const filled = await fillCode(result.code, config);
+        if (!filled) {
+          console.log('No paste/join action was performed.');
+        }
       }
 
       await sleep(config.pollMs);
@@ -568,11 +600,19 @@ async function start() {
 
 async function testOcr() {
   const config = await loadConfig();
-  assertConfigured({ ...config, inputPoint: config.inputPoint ?? { x: 0, y: 0 }, clickJoin: false });
+  if (!config.codeRegion) {
+    throw new Error('Missing codeRegion. Run: npm run setup');
+  }
   const worker = await createOcrWorker(config);
   try {
     const result = await recognizeOnce(worker, config);
     printOcrResult(result, 'OCR test result');
+    if (result.code) {
+      await copyToClipboard(result.code);
+      console.log(`Copied to clipboard: ${result.code}`);
+    } else {
+      console.log('No code recognized. Clipboard was not changed.');
+    }
   } finally {
     await worker.terminate();
   }
