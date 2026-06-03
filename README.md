@@ -102,6 +102,8 @@ Code: ALE458
 
 如果裁剪区域像空白或对比度太低，程序会直接提示 `Crop looks blank...`，避免 OCR 在空白图上乱猜出 `EE` 这类结果。
 
+OCR 会优先识别 `debug/last-crop-raw.png`，也就是你看到的原始裁剪图；如果原图没有读出内容，才会尝试 `debug/last-ocr.png` 这张预处理图。输出里的 `Source` 会告诉你实际采用了哪张图。
+
 常见原因：
 
 - 框选区域没有真正框住房间码，先看 `debug/last-ocr.png`。

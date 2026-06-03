@@ -123,6 +123,7 @@ function printOcrResult(result, label = 'OCR result') {
   console.log(`Raw: ${result.rawText || '(empty)'}`);
   console.log(`Normalized: ${result.normalizedText || '(empty)'}`);
   console.log(`Confidence: ${result.confidence.toFixed(1)}`);
+  console.log(`Source: ${result.source}`);
   console.log(`Reason: ${result.reason}`);
   console.log(`Debug screen: ${path.join(debugDir, 'last-screen.png')}`);
   console.log(`Debug raw crop: ${path.join(debugDir, 'last-crop-raw.png')}`);
@@ -198,8 +199,8 @@ async function cropAndPrepare(region, debugImages) {
   }
 
   const cropped = image.crop({ x, y, w: width, h: height });
+  const rawCropBuffer = await cropped.getBuffer('image/png');
   if (debugImages) {
-    const rawCropBuffer = await cropped.getBuffer('image/png');
     await fs.writeFile(path.join(debugDir, 'last-crop-raw.png'), rawCropBuffer);
   }
 
@@ -218,7 +219,8 @@ async function cropAndPrepare(region, debugImages) {
     await fs.writeFile(path.join(debugDir, 'last-ocr.png'), buffer);
   }
   return {
-    buffer,
+    rawBuffer: rawCropBuffer,
+    processedBuffer: buffer,
     stats
   };
 }
@@ -332,18 +334,33 @@ async function createOcrWorker(config) {
 }
 
 async function recognizeOnce(worker, config) {
-  const { buffer, stats } = await cropAndPrepare(config.codeRegion, config.debugImages);
+  const { rawBuffer, processedBuffer, stats } = await cropAndPrepare(config.codeRegion, config.debugImages);
+  const rawAttempt = await recognizeBuffer(worker, rawBuffer, config, 'last-crop-raw.png');
+  if (rawAttempt.text && !(looksBlank(stats) && rawAttempt.confidence < 45)) {
+    return rawAttempt;
+  }
+
+  const processedAttempt = await recognizeBuffer(worker, processedBuffer, config, 'last-ocr.png');
+  if (processedAttempt.text && !(looksBlank(stats) && processedAttempt.confidence < 45)) {
+    return processedAttempt;
+  }
+
   if (looksBlank(stats)) {
     return {
       text: null,
       code: null,
       rawText: '',
       normalizedText: '',
-      confidence: 0,
+      confidence: Math.max(rawAttempt.confidence, processedAttempt.confidence),
+      source: `${rawAttempt.source}, ${processedAttempt.source}`,
       reason: `Crop looks blank or has too little contrast. contrast=${stats.contrast.toFixed(1)}, brightRatio=${stats.brightRatio.toFixed(4)}`
     };
   }
 
+  return processedAttempt;
+}
+
+async function recognizeBuffer(worker, buffer, config, source) {
   const result = await worker.recognize(buffer);
   const rawText = result.data?.text ?? '';
   const { text, code, normalizedText } = normalizeCode(rawText, config);
@@ -355,6 +372,7 @@ async function recognizeOnce(worker, config) {
     rawText: rawText.trim(),
     normalizedText,
     confidence,
+    source,
     reason
   };
 }
