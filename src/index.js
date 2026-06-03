@@ -12,7 +12,7 @@ const rootDir = path.resolve(__dirname, '..');
 const configPath = path.join(rootDir, 'config.json');
 const debugDir = path.join(rootDir, 'debug');
 const selectorPath = path.join(__dirname, 'select-region.ps1');
-const langPath = path.join(rootDir, 'node_modules', '@tesseract.js-data', 'eng', '4.0.0_best_int');
+const tessdataDir = path.join(rootDir, 'tessdata');
 
 const defaultConfig = {
   codeRegion: null,
@@ -30,6 +30,7 @@ const defaultConfig = {
   clickJoin: true,
   clearBeforePaste: true,
   useCodePattern: false,
+  ocrLanguages: 'eng+chi_sim',
   codePattern: '[A-Z0-9]{5,8}',
   substitutions: {},
   debugImages: true
@@ -117,6 +118,7 @@ async function selectPoint(title) {
 
 function printOcrResult(result, label = 'OCR result') {
   console.log(`\n${label}:`);
+  console.log(`Text: ${result.text ?? '(not found)'}`);
   console.log(`Code: ${result.code ?? '(not found)'}`);
   console.log(`Raw: ${result.rawText || '(empty)'}`);
   console.log(`Normalized: ${result.normalizedText || '(empty)'}`);
@@ -156,6 +158,27 @@ async function setup() {
   console.log('Run: npm run start');
 }
 
+async function ensureTessdata() {
+  await fs.mkdir(tessdataDir, { recursive: true });
+  const languages = ['eng', 'chi_sim'];
+  for (const language of languages) {
+    const target = path.join(tessdataDir, `${language}.traineddata.gz`);
+    if (await pathExists(target)) {
+      continue;
+    }
+
+    const source = path.join(
+      rootDir,
+      'node_modules',
+      '@tesseract.js-data',
+      language,
+      '4.0.0_best_int',
+      `${language}.traineddata.gz`
+    );
+    await fs.copyFile(source, target);
+  }
+}
+
 async function cropAndPrepare(region, debugImages) {
   const display = await findDisplayForRegion(region);
   const imageBuffer = await screenshot({ format: 'png', screen: display.id });
@@ -180,6 +203,8 @@ async function cropAndPrepare(region, debugImages) {
     await fs.writeFile(path.join(debugDir, 'last-crop-raw.png'), rawCropBuffer);
   }
 
+  const stats = getImageStats(cropped);
+
   cropped.greyscale();
   cropped.brightness(0.12);
   cropped.contrast(0.45);
@@ -192,7 +217,39 @@ async function cropAndPrepare(region, debugImages) {
     await fs.mkdir(debugDir, { recursive: true });
     await fs.writeFile(path.join(debugDir, 'last-ocr.png'), buffer);
   }
-  return buffer;
+  return {
+    buffer,
+    stats
+  };
+}
+
+function getImageStats(image) {
+  const data = image.bitmap.data;
+  const pixels = image.bitmap.width * image.bitmap.height;
+  let min = 255;
+  let max = 0;
+  let brightPixels = 0;
+  let darkPixels = 0;
+
+  for (let i = 0; i < data.length; i += 4) {
+    const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
+    min = Math.min(min, brightness);
+    max = Math.max(max, brightness);
+    if (brightness > 180) brightPixels += 1;
+    if (brightness < 60) darkPixels += 1;
+  }
+
+  return {
+    width: image.bitmap.width,
+    height: image.bitmap.height,
+    contrast: max - min,
+    brightRatio: brightPixels / pixels,
+    darkRatio: darkPixels / pixels
+  };
+}
+
+function looksBlank(stats) {
+  return stats.contrast < 18 || (stats.brightRatio < 0.002 && stats.darkRatio > 0.92);
 }
 
 async function findDisplayForRegion(region) {
@@ -221,20 +278,23 @@ async function findDisplayForRegion(region) {
 }
 
 function normalizeCode(text, config) {
-  const upper = text.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const normalizedText = text.replace(/\s+/g, ' ').trim();
+  const upper = normalizedText.toUpperCase().replace(/[^A-Z0-9]/g, '');
   const chars = [...upper].map(char => config.substitutions?.[char] ?? char);
-  const normalized = chars.join('');
+  const codeCandidate = chars.join('');
   if (!config.useCodePattern) {
     return {
-      code: normalized || null,
-      normalizedText: normalized
+      text: normalizedText || null,
+      code: codeCandidate || null,
+      normalizedText
     };
   }
 
-  const match = normalized.match(new RegExp(config.codePattern));
+  const match = codeCandidate.match(new RegExp(config.codePattern));
   return {
+    text: normalizedText || null,
     code: match?.[0] ?? null,
-    normalizedText: normalized
+    normalizedText
   };
 }
 
@@ -250,8 +310,9 @@ function extractConfidence(result) {
 }
 
 async function createOcrWorker(config) {
-  const worker = await createWorker('eng', 1, {
-    langPath,
+  await ensureTessdata();
+  const worker = await createWorker(config.ocrLanguages, 1, {
+    langPath: tessdataDir,
     gzip: true,
     cachePath: path.join(rootDir, '.tesseract-cache'),
     logger: event => {
@@ -262,7 +323,6 @@ async function createOcrWorker(config) {
   });
 
   await worker.setParameters({
-    tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
     tessedit_pageseg_mode: PSM.SINGLE_LINE,
     debug_file: 'NUL',
     preserve_interword_spaces: '0'
@@ -272,13 +332,25 @@ async function createOcrWorker(config) {
 }
 
 async function recognizeOnce(worker, config) {
-  const buffer = await cropAndPrepare(config.codeRegion, config.debugImages);
+  const { buffer, stats } = await cropAndPrepare(config.codeRegion, config.debugImages);
+  if (looksBlank(stats)) {
+    return {
+      text: null,
+      code: null,
+      rawText: '',
+      normalizedText: '',
+      confidence: 0,
+      reason: `Crop looks blank or has too little contrast. contrast=${stats.contrast.toFixed(1)}, brightRatio=${stats.brightRatio.toFixed(4)}`
+    };
+  }
+
   const result = await worker.recognize(buffer);
   const rawText = result.data?.text ?? '';
-  const { code, normalizedText } = normalizeCode(rawText, config);
+  const { text, code, normalizedText } = normalizeCode(rawText, config);
   const confidence = extractConfidence(result);
-  const reason = getOcrReason({ code, rawText, normalizedText, confidence }, config);
+  const reason = getOcrReason({ text, code, rawText, normalizedText, confidence }, config);
   return {
+    text,
     code,
     rawText: rawText.trim(),
     normalizedText,
@@ -291,11 +363,11 @@ function getOcrReason(result, config) {
   if (!result.rawText.trim()) {
     return 'OCR did not read any text. The crop may be empty, hidden, too small, or the stream text is not visible yet.';
   }
-  if (!result.normalizedText) {
-    return 'OCR read text, but nothing looked like letters or numbers.';
+  if (!result.text) {
+    return 'OCR read text, but it became empty after whitespace cleanup.';
   }
   if (!config.useCodePattern) {
-    return 'OK. Pattern matching is disabled, so the normalized OCR text is used directly.';
+    return 'OK. Pattern matching is disabled, so OCR text is printed directly.';
   }
   if (!result.code) {
     return `Text did not match codePattern ${config.codePattern}. Change codePattern if the room code length is different.`;

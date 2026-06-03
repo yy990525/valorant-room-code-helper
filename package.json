@@ -11,6 +11,7 @@
     "test:ocr": "node src/index.js test-ocr"
   },
   "dependencies": {
+    "@tesseract.js-data/chi_sim": "^1.0.0",
     "@tesseract.js-data/eng": "^1.0.0",
     "jimp": "^1.6.0",
     "screenshot-desktop": "^1.15.1",
